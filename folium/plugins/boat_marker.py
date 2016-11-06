@@ -3,21 +3,27 @@
 Boat marker
 -----------
 
-Creates a marker shaped like a boat. Optionally you can append a wind direction. 
+Creates a marker shaped like a boat.
+Optionally you can append a wind direction.
+
 """
 import json
+from jinja2 import Template
 
-from .plugin import Plugin
+from branca.element import JavascriptLink, Figure
+from folium.map import Marker
 
-class BoatMarker(Plugin):
+
+class BoatMarker(Marker):
     """Adds a BoatMarker layer on the map."""
-    def __init__(self, position=None, heading=0, wind_heading=None, wind_speed=0, **kwargs):
+    def __init__(self, location, popup=None, icon=None,
+                 heading=0, wind_heading=None, wind_speed=0, **kwargs):
         """Creates a BoatMarker plugin to append into a map with
         Map.add_plugin.
 
         Parameters
         ----------
-            position: tuple of length 2, default None
+            location: tuple of length 2, default None
                 The latitude and longitude of the marker.
                 If None, then the middle of the map is used.
 
@@ -31,31 +37,29 @@ class BoatMarker(Plugin):
             wind_speed: int, default 0
                 Speed of the wind in knots.
         """
-        super(BoatMarker, self).__init__()
-        self.plugin_name = 'BoatMarker'
-        self.position = None if position is None else tuple(position)
+        super(BoatMarker, self).__init__(location, popup=popup, icon=icon)
+        self._name = 'BoatMarker'
         self.heading = heading
         self.wind_heading = wind_heading
         self.wind_speed = wind_speed
-        self.kwargs = kwargs.copy()
-        
-    def render_header(self, nb):
-        """Generates the HTML part of the plugin."""
-        return """
-            <script src="https://thomasbrueggemann.github.io/leaflet.boatmarker/js/leaflet.boatmarker.min.js"></script>
-            """  if nb==0 else ""
+        self.kwargs = json.dumps(kwargs)
 
-    def render_js(self, nb):
-        """Generates the Javascript part of the plugin."""
-        kwargs_str =  "{%s}" % ",".join(["%s : %s" % (key,json.dumps(val)) for (key,val) in self.kwargs.items()])
-        position_str = "map.getCenter()" if self.position is None else "[%.12f,%.12f]"%self.position
-        out = 'var boatMarker_%s = L.boatMarker(%s, %s).addTo(map);' % (nb,position_str,kwargs_str)
-        
-        if self.wind_heading is None:
-            out += "boatMarker_%s.setHeading(%s);" % (nb,int(self.heading))
-        else:
-            out += "boatMarker_%s.setHeadingWind(%s, %s, %s);"%(nb,int(self.heading),
-                                                             int(self.wind_speed),
-                                                             int(self.wind_heading),
-                                                             )
-        return out
+        self._template = Template(u"""
+            {% macro script(this, kwargs) %}
+                var {{this.get_name()}} = L.boatMarker(
+                    [{{this.location[0]}},{{this.location[1]}}],
+                    {{this.kwargs}}).addTo({{this._parent.get_name()}});
+                {{this.get_name()}}.setHeadingWind({{this.heading}}, {{this.wind_speed}}, {{this.wind_heading}});
+            {% endmacro %}
+            """)  # noqa
+
+    def render(self, **kwargs):
+        super(BoatMarker, self).render(**kwargs)
+
+        figure = self.get_root()
+        assert isinstance(figure, Figure), ("You cannot render this Element "
+                                            "if it's not in a Figure.")
+
+        figure.header.add_child(
+            JavascriptLink("https://thomasbrueggemann.github.io/leaflet.boatmarker/js/leaflet.boatmarker.min.js"),  # noqa
+            name='markerclusterjs')
