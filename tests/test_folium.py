@@ -9,15 +9,21 @@ import pytest
 
 import os
 import json
-import mock
+try:
+    from unittest import mock
+except ImportError:
+    import mock
+
 import pandas as pd
 import jinja2
 from jinja2 import Environment, PackageLoader
-import vincent
-import folium
-from folium.six import PY3
-from folium.plugins import ScrollZoomToggler, MarkerCluster
 
+from six import PY3
+import branca.element
+
+import folium
+from folium.map import Popup, Marker, FitBounds, FeatureGroup
+from folium.features import TopoJson, RectangleMarker, PolygonMarker
 
 rootpath = os.path.abspath(os.path.dirname(__file__))
 
@@ -43,8 +49,8 @@ def setup_data():
 def test_get_templates():
     """Test template getting."""
 
-    env = folium.utilities.get_templates()
-    assert isinstance(env, jinja2.environment.Environment) == True
+    env = branca.utilities.get_templates()
+    assert isinstance(env, jinja2.environment.Environment)
 
 
 class TestFolium(object):
@@ -52,7 +58,7 @@ class TestFolium(object):
 
     def setup(self):
         """Setup Folium Map."""
-        with mock.patch('folium.folium.uuid4') as uuid4:
+        with mock.patch('branca.element.uuid4') as uuid4:
             uuid4().hex = '0' * 32
             self.map = folium.Map(location=[45.5236, -122.6750], width=900,
                                   height=400, max_zoom=20, zoom_start=4)
@@ -61,30 +67,33 @@ class TestFolium(object):
     def test_init(self):
         """Test map initialization."""
 
-        assert self.map.map_type == 'base'
-        assert self.map.mark_cnt == {}
+        assert self.map.get_name() == 'map_00000000000000000000000000000000'
+        assert self.map.get_root() == self.map._parent
         assert self.map.location == [45.5236, -122.6750]
-        assert self.map.map_size == {'width': 900, 'height': 400}
-
-        tmpl = {'Tiles': 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-                'attr': ('Map data (c) <a href="http://openstreetmap.org">'
-                         'OpenStreetMap</a> contributors'),
-                'map_id': 'folium_' + '0' * 32,
-                'lat': 45.5236,
-                'lon': -122.675,
-                'max_zoom': 20,
-                'size': 'style="width: 900px; height: 400px"',
-                'zoom_level': 4,
-                'tile_layers': [],
-                'wms_layers': [],
-                'image_layers': [],
-                'min_zoom': 1,
-                'min_lat': -90,
-                'max_lat': 90,
-                'min_lon': -180,
-                'max_lon': 180}
-
-        assert self.map.template_vars == tmpl
+        assert self.map.zoom_start == 4
+        assert self.map.max_lat == 90
+        assert self.map.min_lat == -90
+        assert self.map.max_lon == 180
+        assert self.map.min_lon == -180
+        assert self.map.position == 'relative'
+        assert self.map.height == (400, 'px')
+        assert self.map.width == (900, 'px')
+        assert self.map.left == (0, '%')
+        assert self.map.top == (0, '%')
+        assert self.map.global_switches.prefer_canvas is False
+        assert self.map.global_switches.no_touch is False
+        assert self.map.global_switches.disable_3d is False
+        assert self.map.to_dict() == {
+            "name": "Map",
+            "id": "00000000000000000000000000000000",
+            "children": {
+                "openstreetmap": {
+                    "name": "TileLayer",
+                    "id": "00000000000000000000000000000000",
+                    "children": {}
+                    }
+                }
+            }
 
     def test_cloudmade(self):
         """Test cloudmade tiles and the API key."""
@@ -93,8 +102,11 @@ class TestFolium(object):
 
         map = folium.Map(location=[45.5236, -122.6750], tiles='cloudmade',
                          API_key='###')
-        assert map.template_vars['Tiles'] == ('http://{s}.tile.cloudmade.com'
-                                              '/###/997/256/{z}/{x}/{y}.png')
+        cloudmade = 'http://{s}.tile.cloudmade.com/###/997/256/{z}/{x}/{y}.png'
+        assert map._children['cloudmade'].tiles == cloudmade
+
+        bounds = map.get_bounds()
+        assert bounds == [[None, None], [None, None]], bounds
 
     def test_builtin_tile(self):
         """Test custom maptiles."""
@@ -103,11 +115,16 @@ class TestFolium(object):
         for tiles in default_tiles:
             map = folium.Map(location=[45.5236, -122.6750], tiles=tiles)
             tiles = ''.join(tiles.lower().strip().split())
-            url = map.tile_types[tiles]['templ'].render()
-            attr = map.tile_types[tiles]['attr'].render()
+            url = 'tiles/{}/tiles.txt'.format
+            attr = 'tiles/{}/attr.txt'.format
+            url = map._env.get_template(url(tiles)).render()
+            attr = map._env.get_template(attr(tiles)).render()
 
-            assert map.template_vars['Tiles'] == url
-            assert map.template_vars['attr'] == attr
+            assert map._children[tiles].tiles == url
+            assert map._children[tiles].attr == attr
+
+        bounds = map.get_bounds()
+        assert bounds == [[None, None], [None, None]], bounds
 
     def test_custom_tile(self):
         """Test custom tile URLs."""
@@ -119,321 +136,200 @@ class TestFolium(object):
             folium.Map(location=[45.5236, -122.6750], tiles=url)
 
         map = folium.Map(location=[45.52, -122.67], tiles=url, attr=attr)
-        assert map.template_vars['Tiles'] == url
-        assert map.template_vars['attr'] == attr
+        assert map._children[url].tiles == url
+        assert map._children[url].attr == attr
 
-    def test_wms_layer(self):
-        """Test WMS layer URLs."""
+        bounds = map.get_bounds()
+        assert bounds == [[None, None], [None, None]], bounds
 
-        map = folium.Map(location=[44, -73], zoom_start=3)
-        wms_url = 'http://gis.srh.noaa.gov/arcgis/services/NDFDTemps/'
-        wms_url += 'MapServer/WMSServer'
-        wms_name = "Temperature"
-        wms_layers = 16
-        wms_format = "image/png"
-        map.add_wms_layer(wms_name=wms_name,
-                          wms_url=wms_url,
-                          wms_format=wms_format,
-                          wms_layers=wms_layers,
-                          wms_transparent=True)
+    def test_feature_group(self):
+        """Test FeatureGroup."""
 
-        wms_temp = self.env.get_template('wms_layer.js')
-        wms = wms_temp.render({'wms_name': wms_name,
-                               'wms_url': wms_url,
-                               'wms_format': wms_format,
-                               'wms_layer_names': wms_layers,
-                               'wms_transparent': 'true'})
-        assert map.template_vars['wms_layers'][0] == wms
+        map = folium.Map()
+        feature_group = FeatureGroup()
+        feature_group.add_child(Marker([45, -30], popup=Popup('-30')))
+        feature_group.add_child(Marker([45, 30], popup=Popup('30')))
+        map.add_child(feature_group)
+        map.add_child(folium.map.LayerControl())
 
-    def test_simple_marker(self):
-        """Test simple marker addition."""
+        map._repr_html_()
 
-        mark_templ = self.env.get_template('simple_marker.js')
-        popup_templ = self.env.get_template('simple_popup.js')
-
-        # Single Simple marker.
-        self.map.simple_marker(location=[45.50, -122.7])
-        mark_1 = mark_templ.render({'marker': 'marker_1', 'lat': 45.50,
-                                    'lon': -122.7,
-                                    'icon': "{'icon':marker_1_icon}"})
-        assert self.map.template_vars['custom_markers'][0][1] == mark_1
-        assert self.map.template_vars['custom_markers'][0][2] == ""
-
-        # Test Simple marker addition.
-        self.map.simple_marker(location=[45.60, -122.8], popup='Hi')
-        mark_2 = mark_templ.render({'marker': 'marker_2', 'lat': 45.60,
-                                    'lon': -122.8,
-                                    'icon': "{'icon':marker_2_icon}"})
-        popup_2 = popup_templ.render({'pop_name': 'marker_2',
-                                      'pop_txt': json.dumps('Hi'),
-                                      'width': 300})
-        assert self.map.mark_cnt['simple'] == 2
-        assert self.map.template_vars['custom_markers'][1][1] == mark_2
-        assert self.map.template_vars['custom_markers'][1][2] == popup_2
-
-        # Test no popup.
-        self.map.simple_marker(location=[45.60, -122.8])
-        nopopup = ''
-        assert self.map.template_vars['custom_markers'][2][2] == nopopup
-
-    def test_div_markers(self):
-        '''Test div marker list addition'''
-
-        icon_templ = self.env.get_template('static_div_icon.js')
-        mark_templ = self.env.get_template('simple_marker.js')
-        popup_templ = self.env.get_template('simple_popup.js')
-
-        # Test with popups (expected use case).
-        self.map.div_markers(locations=[[37.421114, -122.128314],
-                                        [37.391637, -122.085416],
-                                        [37.388832, -122.087709]],
-                             popups=['1437494575531',
-                                     '1437492135937',
-                                     '1437493590434'])
-        icon_1 = icon_templ.render({'icon_name': 'div_marker_1_0_icon',
-                                    'size': 10})
-        mark_1 = mark_templ.render({'marker': 'div_marker_1_0',
-                                    'lat': 37.421114,
-                                    'lon': -122.128314,
-                                    'icon': "{'icon':div_marker_1_0_icon}"})
-        popup_1 = popup_templ.render({'pop_name': 'div_marker_1_0',
-                                      'pop_txt': '"1437494575531"',
-                                      'width': 300})
-        assert self.map.mark_cnt['div_mark'] == 1
-        assert self.map.template_vars['div_markers'][0][0] == icon_1
-        assert self.map.template_vars['div_markers'][0][1] == mark_1
-        assert self.map.template_vars['div_markers'][0][2] == popup_1
-
-        # Second set of markers with popups to test the numbering.
-        self.map.div_markers(locations=[[37.421114, -122.128314],
-                                        [37.391637, -122.085416],
-                                        [37.388832, -122.087709]],
-                             popups=['1437494575531',
-                                     '1437492135937',
-                                     '1437493590434'])
-        icon_2 = icon_templ.render({'icon_name': 'div_marker_2_1_icon',
-                                    'size': 10})
-        mark_2 = mark_templ.render({'marker': 'div_marker_2_1',
-                                    'lat': 37.391637,
-                                    'lon': -122.085416,
-                                    'icon': "{'icon':div_marker_2_1_icon}"})
-        popup_2 = popup_templ.render({'pop_name': 'div_marker_2_1',
-                                      'pop_txt': '"1437492135937"',
-                                      'width': 300})
-        assert self.map.mark_cnt['div_mark'] == 2
-        assert self.map.template_vars['div_markers'][4][0] == icon_2
-        assert self.map.template_vars['div_markers'][4][1] == mark_2
-        assert self.map.template_vars['div_markers'][4][2] == popup_2
-
-        # Test no popup. If there are no popups,
-        # then we should get a RuntimeError.
-        with pytest.raises(RuntimeError):
-            self.map.div_markers([[45.60, -122.8]])
+        bounds = map.get_bounds()
+        assert bounds == [[45, -30], [45, 30]], bounds
 
     def test_circle_marker(self):
         """Test circle marker additions."""
 
+        self.map = folium.Map(location=[45.60, -122.8])
         circ_templ = self.env.get_template('circle_marker.js')
 
         # Single Circle marker.
-        self.map.circle_marker(location=[45.60, -122.8], popup='Hi')
-        circle_1 = circ_templ.render({'circle': 'circle_1', 'lat': 45.60,
+        marker = folium.features.CircleMarker([45.60, -122.8], popup='Hi')
+        self.map.add_child(marker)
+        circle_1 = circ_templ.render({'circle': marker.get_name(),
+                                      'lat': 45.60,
                                       'lon': -122.8, 'radius': 500,
                                       'line_color': 'black',
                                       'fill_color': 'black',
                                       'fill_opacity': 0.6})
-        assert self.map.template_vars['markers'][0][0] == circle_1
+        assert (''.join(circle_1.split())[:-1] in
+                ''.join(self.map.get_root().render().split()))
 
         # Second circle marker.
-        self.map.circle_marker(location=[45.70, -122.9], popup='Hi')
-        circle_2 = circ_templ.render({'circle': 'circle_2', 'lat': 45.70,
+        marker = folium.features.CircleMarker([45.70, -122.9], popup='Hi')
+        self.map.add_child(marker)
+        circle_2 = circ_templ.render({'circle': marker.get_name(),
+                                      'lat': 45.70,
                                       'lon': -122.9, 'radius': 500,
                                       'line_color': 'black',
                                       'fill_color': 'black',
                                       'fill_opacity': 0.6})
-        assert self.map.template_vars['markers'][1][0] == circle_2
+        assert (''.join(circle_2.split())[:-1] in
+                ''.join(self.map.get_root().render().split()))
 
-    def test_poly_marker(self):
-        """Test polygon marker."""
+        bounds = self.map.get_bounds()
+        assert bounds == [[45.6, -122.9], [45.7, -122.8]], bounds
 
-        poly_temp = self.env.get_template('poly_marker.js')
+    def test_rectangle_marker(self):
+        """Test rectangle marker additions."""
 
-        polygon = poly_temp.render({'marker': 'polygon_1',
-                                    'lat': 45.5,
-                                    'lon': -122.5,
-                                    'line_color': 'black',
-                                    'line_opacity': 1,
-                                    'line_weight': 2,
-                                    'fill_color': 'blue',
-                                    'fill_opacity': 1,
-                                    'num_sides': 4,
-                                    'rotation': 0,
-                                    'radius': 15})
+        self.map = folium.Map(location=[45.60, -122.8])
+        rect_templ = self.env.get_template('rectangle_marker.js')
 
-        self.map.polygon_marker(location=[45.5, -122.5])
-        assert self.map.template_vars['markers'][0][0] == polygon
+        # Single Rectangle marker.
+        bounds = [45.60, -122.8, 45.61, -122.7]
+        self.map.add_child(RectangleMarker(bounds=bounds, popup='Hi'))
+        marker = list(self.map._children.values())[-1]
+        rect_1 = rect_templ.render({'RectangleMarker': marker.get_name(),
+                                    'location': [45.60, -122.8, 45.61, -122.7],
+                                    'color': 'black',
+                                    'fill_color': 'black',
+                                    'fill_opacity': 0.6,
+                                    'weight': 1})
+        assert (''.join(rect_1.split())[:-1] in
+                ''.join(self.map.get_root().render().split()))
 
-    def test_latlng_pop(self):
-        """Test lat/lon popovers."""
+        # Second Rectangle marker.
+        bounds = [45.70, -122.9, 45.75, -122.5]
+        self.map.add_child(RectangleMarker(bounds=bounds, popup='Hi'))
+        marker = list(self.map._children.values())[-1]
+        rect_2 = rect_templ.render({'RectangleMarker': marker.get_name(),
+                                    'location': [45.70, -122.9, 45.75, -122.5],
+                                    'color': 'black',
+                                    'fill_color': 'black',
+                                    'fill_opacity': 0.6,
+                                    'weight': 1})
+        assert (''.join(rect_2.split())[:-1] in
+                ''.join(self.map.get_root().render().split()))
 
-        self.map.lat_lng_popover()
-        pop_templ = self.env.get_template('lat_lng_popover.js').render()
-        assert self.map.template_vars['lat_lng_pop'] == pop_templ
+        bounds = self.map.get_bounds()
+        assert bounds == [[45.6, -122.9], [45.7, -122.8]], bounds
 
-    def test_click_for_marker(self):
-        """Test click for marker functionality."""
+    def test_polygon_marker(self):
+        """Test polygon additions."""
 
-        # Lat/lon popover.
-        self.map.click_for_marker()
-        click_templ = self.env.get_template('click_for_marker.js')
-        click = click_templ.render({'popup': ('"Latitude: " + lat + "<br>'
-                                              'Longitude: " + lng ')})
-        assert self.map.template_vars['click_pop'] == click
+        self.map = folium.Map(location=[45.60, -122.8])
+        polygon_templ = self.env.get_template('polygon.js')
 
-        # Custom popover.
-        self.map.click_for_marker(popup='Test')
-        click_templ = self.env.get_template('click_for_marker.js')
-        click = click_templ.render({'popup': '"Test"'})
-        assert self.map.template_vars['click_pop'] == click
+        # Single PolygonMarker.
+        locations = [[35.6636, 139.7634],
+                     [35.6629, 139.7664],
+                     [35.6663, 139.7706],
+                     [35.6725, 139.7632],
+                     [35.6728, 139.7627],
+                     [35.6720, 139.7606],
+                     [35.6682, 139.7588],
+                     [35.6663, 139.7627]]
+        self.map.add_child(PolygonMarker(locations=locations, popup='Hi'))
+        marker = list(self.map._children.values())[-1]
+        polygon_1 = polygon_templ.render({'PolygonMarker': marker.get_name(),
+                                          'location': locations,
+                                          'color': 'black',
+                                          'fill_color': 'black',
+                                          'fill_opacity': 0.6,
+                                          'weight': 1})
+        assert (''.join(polygon_1.split())[:-1] in
+                ''.join(self.map.get_root().render().split()))
 
-    def test_vega_popup(self):
-        """Test vega popups."""
+        # Second PolygonMarker.
+        locations = [[35.5636, 138.7634],
+                     [35.5629, 138.7664],
+                     [35.5663, 138.7706],
+                     [35.5725, 138.7632],
+                     [35.5728, 138.7627],
+                     [35.5720, 138.7606],
+                     [35.5682, 138.7588],
+                     [35.5663, 138.7627]]
+        self.map.add_child(PolygonMarker(locations=locations, color='red',
+                                         fill_color='red', fill_opacity=0.7,
+                                         weight=3, popup='Hi'))
+        marker = list(self.map._children.values())[-1]
+        polygon_2 = polygon_templ.render({'PolygonMarker': marker.get_name(),
+                                          'location': locations,
+                                          'color': 'red',
+                                          'fill_color': 'red',
+                                          'fill_opacity': 0.7,
+                                          'weight': 3})
+        assert (''.join(polygon_2.split())[:-1] in
+                ''.join(self.map.get_root().render().split()))
 
-        vis = vincent.Bar(width=675 - 75, height=350 - 50, no_data=True)
+        bounds = self.map.get_bounds()
+        assert bounds == [[[35.5636, 138.7634], [35.5629, 138.7664]],
+                          [[35.6636, 139.7634], [35.6629, 139.7664]]], bounds
 
-        self.map.simple_marker(location=[45.60, -122.8],
-                               popup=(vis, 'vis.json'))
-        popup_temp = self.env.get_template('vega_marker.js')
-        vega = popup_temp.render({'mark': 'marker_1', 'div_id': 'vis',
-                                  'width': 675, 'height': 350,
-                                  'max_width': 900,
-                                  'json_out': 'vis.json',
-                                  'vega_id': '#vis'})
-        assert self.map.template_vars['custom_markers'][0][2] == vega
-
-    def test_geo_json(self):
-        """Test geojson method."""
-
-        path = os.path.join(rootpath, 'us-counties.json')
-        geo_path = ".defer(d3.json, '{0}')".format(path)
-
-        # No data binding.
-        self.map.geo_json(geo_path=path)
-        geo_path = ".defer(d3.json, '{0}')".format(path)
-        map_var = 'gjson_1'
-        layer_var = 'gjson_1'
-        style_temp = self.env.get_template('geojson_style.js')
-        style = style_temp.render({'style': 'style_1',
-                                   'line_color': 'black',
-                                   'line_weight': 1,
-                                   'line_opacity': 1,
-                                   'fill_color': 'blue',
-                                   'fill_opacity': 0.6})
-        layer = ('gJson_layer_{0} = L.geoJson({1}, {{style: {2},'
-                 'onEachFeature: onEachFeature}}).addTo(map)'
-                 .format(1, layer_var, 'style_1'))
-
-        templ = self.map.template_vars
-        assert self.map.map_type == 'geojson'
-        assert templ['func_vars'][0] == map_var
-        assert templ['geo_styles'][0] == style
-        assert templ['gjson_layers'][0] == layer
-        assert templ['json_paths'][0] == geo_path
-
-        # Data binding incorrect color value error.
-        data = setup_data()
-        with pytest.raises(ValueError):
-            self.map.geo_json(path, data=data,
-                              columns=['FIPS_Code', 'Unemployed_2011'],
-                              key_on='feature.id', fill_color='blue')
-
-        # Data binding threshold_scale too long.
-        data = setup_data()
-        with pytest.raises(ValueError):
-            self.map.geo_json(path, data=data,
-                              columns=['FIPS_Code', 'Unemployed_2011'],
-                              key_on='feature.id',
-                              threshold_scale=[1, 2, 3, 4, 5, 6, 7],
-                              fill_color='YlGnBu')
-
-        # With DataFrame data binding, default threshold scale.
-        self.map.geo_json(geo_path=path, data=data,
-                          columns=['FIPS_Code', 'Unemployed_2011'],
-                          key_on='feature.id', fill_color='YlGnBu',
-                          reset=True)
-        geo_path = ".defer(d3.json, '{0}')".format(path)
-        data_path = ".defer(d3.json, '{0}')".format('data.json')
-        map_var = 'gjson_1'
-        layer_var = 'gjson_1'
-        data_var = 'data_1'
-
-        domain = [4.0, 1000.0, 3000.0, 5000.0, 9000.0]
-        palette = folium.utilities.color_brewer('YlGnBu')
-        d3range = palette[0: len(domain) + 1]
-        color_temp = self.env.get_template('d3_threshold.js')
-        scale = color_temp.render({'domain': domain,
-                                   'range': d3range})
-
-        style_temp = self.env.get_template('geojson_style.js')
-        color = 'color(matchKey(feature.id, data_1))'
-        style = style_temp.render({'style': 'style_1',
-                                   'line_color': 'black',
-                                   'line_weight': 1,
-                                   'line_opacity': 1,
-                                   'quantize_fill': color,
-                                   'fill_opacity': 0.6})
-
-        layer = ('gJson_layer_{0} = L.geoJson({1}, {{style: {2},'
-                 'onEachFeature: onEachFeature}}).addTo(map)'
-                 .format(1, layer_var, 'style_1'))
-
-        templ = self.map.template_vars
-        assert templ['func_vars'] == [data_var, map_var]
-        assert templ['geo_styles'][0] == style
-        assert templ['gjson_layers'][0] == layer
-        assert templ['json_paths'] == [data_path, geo_path]
-        assert templ['color_scales'][0] == scale
+    def test_topo_json_smooth_factor(self):
+        """Test topojson smooth factor method."""
+        self.map = folium.Map([43, -100], zoom_start=4)
 
         # Adding TopoJSON as additional layer.
-        path_2 = 'or_counties_topo.json'
-        self.map.geo_json(geo_path=path_2, topojson='objects.or_counties_geo')
-        geo_path_2 = ".defer(d3.json, '{0}')".format(path_2)
-        map_var_2 = 'tjson_2'
-        layer_var_2 = 'topo_2'
-        topo_func = ('topo_2 = topojson.feature(tjson_2,'
-                     ' tjson_2.objects.or_counties_geo);')
-        fmt = ('gJson_layer_{0} = L.geoJson({1}, {{style: {2},'
-               'onEachFeature: onEachFeature}}).addTo(map)')
-        layer_2 = fmt.format(2, layer_var_2, 'style_2')
+        path = os.path.join(rootpath, 'or_counties_topo.json')
+        self.map.choropleth(geo_path=path,
+                            topojson='objects.or_counties_geo',
+                            smooth_factor=0.5)
 
-        templ = self.map.template_vars
-        assert templ['func_vars'] == [data_var, map_var, map_var_2]
-        assert templ['gjson_layers'][1] == layer_2
-        assert templ['json_paths'] == [data_path, geo_path, geo_path_2]
-        assert templ['topo_convert'][0] == topo_func
+        out = self.map._parent.render()
+
+        # Verify TopoJson
+        topo_json = [val for key, val in self.map._children.items()
+                     if isinstance(val, TopoJson)][0]
+        topojson_str = topo_json._template.module.script(topo_json)
+        assert ''.join(topojson_str.split())[:-1] in ''.join(out.split())
 
     def test_map_build(self):
         """Test map build."""
 
         # Standard map.
-        self.map._build_map()
+        self.setup()
+        out = self.map._parent.render()
         html_templ = self.env.get_template('fol_template.html')
-
-        tmpl = {'Tiles': 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-                'attr': ('Map data (c) <a href="http://openstreetmap.org">'
-                         'OpenStreetMap</a> contributors'),
-                'map_id': 'folium_' + '0' * 32,
-                'lat': 45.5236, 'lon': -122.675, 'max_zoom': 20,
-                'size': 'style="width: 900px; height: 400px"',
+        attr = ('Data by <a href="http://openstreetmap.org">OpenStreetMap'
+                '</a>,under '
+                '<a href="http://www.openstreetmap.org/copyright">ODbL</a>.')
+        tile_layers = [
+            {'id': 'tile_layer_'+'0'*32,
+             'address': 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+             'attr': attr,
+             'max_zoom': 20,
+             'min_zoom': 1,
+             'detect_retina': False,
+             'no_wrap': False,
+             'continuous_world': False
+             }]
+        tmpl = {'map_id': 'map_' + '0' * 32,
+                'lat': 45.5236, 'lon': -122.675,
+                'size': 'width: 900.0px; height: 400.0px;',
                 'zoom_level': 4,
-                'min_zoom': 1,
                 'min_lat': -90,
                 'max_lat': 90,
                 'min_lon': -180,
-                'max_lon': 180}
+                'max_lon': 180,
+                'tile_layers': tile_layers,
+                'crs': 'EPSG3857',
+                'world_copy_jump': False
+                }
         HTML = html_templ.render(tmpl, plugins={})
 
-        assert self.map.HTML == HTML
+        assert ''.join(out.split()) == ''.join(HTML.split())
 
     def test_tile_attr_unicode(self):
         """Test tile attribution unicode
@@ -445,91 +341,38 @@ class TestFolium(object):
         if not PY3:
             map = folium.Map(location=[45.5236, -122.6750],
                              tiles='test', attr=b'unicode')
-            map._build_map()
+            map._parent.render()
         else:
             map = folium.Map(location=[45.5236, -122.6750],
                              tiles='test', attr=u'юникод')
-            map._build_map()
+            map._parent.render()
         map = folium.Map(location=[45.5236, -122.6750],
                          tiles='test', attr='юникод')
-        map._build_map()
-
-    def test_create_map(self):
-        """Test create map."""
-
-        map = folium.Map(location=[45.5236, -122.6750],
-                         tiles='test', attr='юникод')
-
-        # Add json data.
-        path = os.path.join(rootpath, 'us-counties.json')
-        data = setup_data()
-        map.geo_json(geo_path=path, data=data,
-                     columns=['FIPS_Code', 'Unemployed_2011'],
-                     key_on='feature.id', fill_color='YlGnBu',
-                     reset=True)
-
-        # Add plugins.
-        map.polygon_marker(location=[45.5, -122.5])
-
-        # Test write.
-        map.create_map()
-
-    def test_line(self):
-        """Test line."""
-
-        line_temp = self.env.get_template('polyline.js')
-
-        line_opts = {
-            'color': 'blue',
-            'weight': 2,
-            'opacity': 1
-        }
-        locations = [
-            [[45.5236, -122.6750], [45.5236, -122.6751]],
-            [[45.5237, -122.6750], [45.5237, -122.6751]],
-            [[45.5238, -122.6750], [45.5238, -122.6751]]
-        ]
-        line_rendered = line_temp.render({'line': 'line_1',
-                                          'locations': locations,
-                                          'options': line_opts})
-
-        self.map.line(locations=locations,
-                      line_color=line_opts['color'],
-                      line_weight=line_opts['weight'],
-                      line_opacity=line_opts['opacity'])
-        assert self.map.template_vars['lines'][0][0] == line_rendered
-
-    def test_multi_polyline(self):
-        """Test multi_polyline."""
-
-        multiline_temp = self.env.get_template('multi_polyline.js')
-
-        multiline_opts = {'color': 'blue',
-                          'weight': 2,
-                          'opacity': 1}
-        locations = [[[45.5236, -122.6750], [45.5236, -122.6751]],
-                     [[45.5237, -122.6750], [45.5237, -122.6751]],
-                     [[45.5238, -122.6750], [45.5238, -122.6751]]]
-        multiline_rendered = multiline_temp.render({'multiline': 'multiline_1',
-                                                    'locations': locations,
-                                                    'options': multiline_opts})
-
-        self.map.multiline(locations=locations,
-                           line_color=multiline_opts['color'],
-                           line_weight=multiline_opts['weight'],
-                           line_opacity=multiline_opts['opacity'])
-        assert self.map.template_vars['multilines'][0][0] == multiline_rendered
+        map._parent.render()
 
     def test_fit_bounds(self):
         """Test fit_bounds."""
         bounds = ((52.193636, -2.221575), (52.636878, -1.139759))
+
+        self.setup()
+        self.map.fit_bounds(bounds)
+        fitbounds = [val for key, val in self.map._children.items() if
+                     isinstance(val, FitBounds)][0]
+        out = self.map._parent.render()
+
         fit_bounds_tpl = self.env.get_template('fit_bounds.js')
         fit_bounds_rendered = fit_bounds_tpl.render({
             'bounds': json.dumps(bounds),
+            'this': fitbounds,
             'fit_bounds_options': {}, })
 
-        self.map.fit_bounds(bounds)
-        assert self.map.template_vars['fit_bounds'] == fit_bounds_rendered
+        assert ''.join(fit_bounds_rendered.split()) in ''.join(out.split())
+
+        self.setup()
+        self.map.fit_bounds(bounds, max_zoom=15, padding=(3, 3))
+        fitbounds = [val for key, val in self.map._children.items() if
+                     isinstance(val, FitBounds)][0]
+        out = self.map._parent.render()
 
         fit_bounds_tpl = self.env.get_template('fit_bounds.js')
         fit_bounds_rendered = fit_bounds_tpl.render({
@@ -537,61 +380,69 @@ class TestFolium(object):
             'fit_bounds_options': json.dumps({'maxZoom': 15,
                                               'padding': (3, 3), },
                                              sort_keys=True),
-        })
+            'this': fitbounds,
+            })
 
-        self.map.fit_bounds(bounds, max_zoom=15, padding=(3, 3))
+        assert ''.join(fit_bounds_rendered.split()) in ''.join(out.split())
 
-        assert self.map.template_vars['fit_bounds'] == fit_bounds_rendered
+        bounds = self.map.get_bounds()
+        assert bounds == [[None, None], [None, None]], bounds
 
-    def test_image_overlay(self):
-        """Test image overlay."""
-        from numpy.random import random
-        from folium.utilities import write_png
-        import base64
+    def test_custom_icon(self):
+        """Test CustomIcon."""
+        self.setup()
 
-        data = random((100, 100))
-        png_str = write_png(data)
-        with open('data.png', 'wb') as f:
-            f.write(png_str)
-        png = "data:image/png;base64,{}".format
-        inline_image_url = png(base64.b64encode(png_str).decode('utf-8'))
+        icon_image = "http://leafletjs.com/docs/images/leaf-green.png"
+        shadow_image = "http://leafletjs.com/docs/images/leaf-shadow.png"
 
-        image_tpl = self.env.get_template('image_layer.js')
-        image_name = 'Image_Overlay'
-        image_opacity = 0.25
-        image_url = 'data.png'
-        min_lon, max_lon, min_lat, max_lat = -90.0, 90.0, -180.0, 180.0
-        image_bounds = [[min_lon, min_lat], [max_lon, max_lat]]
+        self.map = folium.Map([45, -100], zoom_start=4)
+        i = folium.features.CustomIcon(icon_image,
+                                       icon_size=(38, 95),
+                                       icon_anchor=(22, 94),
+                                       shadow_image=shadow_image,
+                                       shadow_size=(50, 64),
+                                       shadow_anchor=(4, 62),
+                                       popup_anchor=(-3, -76),)
+        mk = folium.map.Marker([45, -100], icon=i,
+                               popup=folium.map.Popup('Hello'))
+        self.map.add_child(mk)
+        self.map._parent.render()
 
-        image_rendered = image_tpl.render({'image_name': image_name,
-                                           'image_url': image_url,
-                                           'image_bounds': image_bounds,
-                                           'image_opacity': image_opacity})
+        bounds = self.map.get_bounds()
+        assert bounds == [[45, -100], [45, -100]], bounds
 
-        self.map.image_overlay(data, filename=image_url)
-        assert image_rendered in self.map.template_vars['image_layers']
+    def test_tile_layer(self):
+        mapa = folium.Map([48., 5.], tiles='stamentoner', zoom_start=6)
+        layer = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
+        mapa.add_child(folium.map.TileLayer(layer, name='OpenStreetMap',
+                                            attr='attribution'))
+        mapa.add_child(folium.map.TileLayer(layer,
+                                            name='OpenStreetMap2',
+                                            attr='attribution2',
+                                            overlay=True))
+        mapa.add_child(folium.map.LayerControl())
+        mapa._repr_html_()
 
-        image_rendered = image_tpl.render({'image_name': image_name,
-                                           'image_url': inline_image_url,
-                                           'image_bounds': image_bounds,
-                                           'image_opacity': image_opacity})
+        bounds = self.map.get_bounds()
+        assert bounds == [[None, None], [None, None]], bounds
 
-        self.map.image_overlay(data)
-        assert image_rendered in self.map.template_vars['image_layers']
+    def test_global_switches(self):
+        mapa = folium.Map(prefer_canvas=True)
+        assert (mapa.global_switches.prefer_canvas is True and
+                mapa.global_switches.no_touch is False and
+                mapa.global_switches.disable_3d is False)
 
-    def test_scroll_zoom_toggler_plugin(self):
-        """Test ScrollZoomToggler plugin."""
-        a_map = folium.Map([45, 3], zoom_start=4)
-        a_map.add_plugin(ScrollZoomToggler())
-        a_map._build_map()
+        mapb = folium.Map(no_touch=True)
+        assert (mapb.global_switches.prefer_canvas is False and
+                mapb.global_switches.no_touch is True and
+                mapb.global_switches.disable_3d is False)
 
-    def test_marker_cluster_plugin(self):
-        """Test MarkerCluster plugin."""
-        data = [(35, -12, "lower left"),
-                (35, 30, "lower right"),
-                (60, -12, "upper left"),
-                (60, 30, "upper right"),
-                ]
-        a_map = folium.Map([0, 0], zoom_start=0)
-        a_map.add_plugin(MarkerCluster(data))
-        a_map._build_map()
+        mapc = folium.Map(disable_3d=True)
+        assert (mapc.global_switches.prefer_canvas is False and
+                mapc.global_switches.no_touch is False and
+                mapc.global_switches.disable_3d is True)
+
+        mapd = folium.Map(prefer_canvas=True, no_touch=True, disable_3d=True)
+        assert (mapd.global_switches.prefer_canvas is True and
+                mapd.global_switches.no_touch is True and
+                mapd.global_switches.disable_3d is True)
